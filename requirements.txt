@@ -1,0 +1,15 @@
+# Python version requirement
+python_requires>=3.12
+
+# Core dependencies for the SWE Terminal Tool
+psutil>=5.9.0
+
+# Optional dependencies for enhanced functionality
+# pywinpty>=0.5.7  # For Windows ConPTY support (uncomment if on Windows)
+
+# Development and testing dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0

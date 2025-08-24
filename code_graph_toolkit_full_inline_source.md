@@ -22,19 +22,43 @@ codegraph-toolkit/
     exporters.py
     queries.py
     llm_packager.py
+    query_engine.py        # dynamic search & natural-language filters
+    resolver_java.py       # NEW: import/type-based call resolution for Java
+    server.py              # FastAPI server with OpenAPI for Google Agent tools
 ```
+
+codegraph-toolkit/
+pyproject.toml
+README.md
+LICENSE
+requirements.txt
+.gitignore
+codegraph/
+**init**.py
+**main**.py
+cli.py
+graph\_schema.py
+graph\_builder.py
+java\_parser.py
+python\_parser.py
+exporters.py
+queries.py
+llm\_packager.py
+query\_engine.py        # NEW: dynamic search & natural-language filters
+server.py              # NEW: FastAPI server with OpenAPI for Google Agent tools
+
+````
 
 ---
 
 ## 🔧 How to use this inline source
-
-1. Create a folder named `codegraph-toolkit` and place the files exactly as below.
-2. In a terminal from the project root:
-
+1) Create a folder named `codegraph-toolkit` and place the files exactly as below.
+2) In a terminal from the project root:
    ```bash
    python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -e .
-   ```
+````
+
 3. Run the CLI:
 
    ```bash
@@ -54,11 +78,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codegraph-toolkit"
-version = "0.1.0"
-description = "Parse repos into a rich code graph and build LLM-ready slices (controllers, listeners)."
+version = "0.2.0"
+description = "Parse repos into a rich code graph, expose dynamic search via REST, and build LLM-ready slices."
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["javalang>=0.13.0", "networkx>=3.0"]
+dependencies = [
+  "javalang>=0.13.0",
+  "networkx>=3.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.22",
+  "pydantic>=2.5"
+]
 
 [project.scripts]
 codegraph = "codegraph.cli:main"
@@ -72,13 +102,49 @@ codegraph = "codegraph.cli:main"
 # CodeGraph Toolkit
 
 Parse a source repo into a code graph (classes, methods, interfaces, calls, overrides, annotations),
-export JSON/GraphML/Mermaid, and carve LLM-ready slices for **controller**/**listener** analysis.
+export JSON/GraphML/Mermaid, carve LLM-ready slices for **controller**/**listener** analysis, and expose a **REST tool** for agents.
 
 ## Install
 ```bash
-python -m venv .venv && source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
+python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -e .
 ````
+
+## Quickstart (CLI)
+
+```bash
+codegraph --repo /path/to/repo --lang auto --out ./out --format json graphml mermaid
+codegraph --repo /path/to/repo --slice controllers --neighbors 2 --out ./out --llm-pack controllers
+codegraph --repo /path/to/repo --slice listeners   --neighbors 2 --out ./out --llm-pack listeners
+```
+
+## Run as an Agent Tool (REST)
+
+```bash
+uvicorn codegraph.server:app --host 0.0.0.0 --port 8080
+# Endpoints:
+#   POST /build   -> build graph from a repo path (container/local volume)
+#   POST /query   -> dynamic search (natural language, regex, annotations, class/method names, k-hops)
+#   POST /slice   -> controllers|listeners with neighbors
+#   POST /llm-pack-> compact pack + prompt (controllers|listeners)
+```
+
+### Google Agent (Agent Builder / Vertex AI) integration
+
+* Deploy the server to Cloud Run with volume or cloud storage access to your repos.
+* Register the OpenAPI (FastAPI auto-docs at `/openapi.json`).
+* In your agent, call the tool with user NL queries (e.g., "find all Kafka listeners touching OrderService and show callers 2 hops out").
+
+Artifacts:
+
+* `graph.json` / `slice.controllers.json` / `slice.listeners.json`
+* `graph.graphml` / `graph.mmd`
+* `llm/<scenario>/pack.json` + `prompt.txt`
+
+```bash
+python -m venv .venv && source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
+pip install -e .
+```
 
 ## Quickstart
 
@@ -152,6 +218,9 @@ __pycache__/
 ```text
 javalang>=0.13.0
 networkx>=3.0
+fastapi>=0.110
+uvicorn>=0.22
+pydantic>=2.5
 ```
 
 ---
@@ -300,15 +369,16 @@ class CodeGraph:
 
 ```python
 from __future__ import annotations
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import javalang
 from .graph_schema import Node, Edge, NodeType, EdgeType
 
 
 def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
     """Parse a single Java source file into nodes/edges.
-    Captures package, imports, classes/interfaces/enums, methods, annotations, extends/implements, naive calls.
-    Also creates placeholder nodes for unresolved superclasses/interfaces to enable override tracing.
+    Captures package, imports, classes/interfaces/enums, fields, methods, annotations,
+    extends/implements, and naive calls. Fields are recorded on the class node extras
+    for later call resolution (see resolver_java.resolve_calls).
     """
     tree = javalang.parse.parse(src)
     package_name = tree.package.name if tree.package else None
@@ -343,6 +413,7 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
 
         class_fqn = fqn(type_decl.name)
         class_id = f"java::{class_fqn}"
+        extras: Dict[str, dict] = {"fields": {}}
         class_node = Node(
             id=class_id,
             type=ntype,
@@ -352,6 +423,7 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
             line=(type_decl.position.line if type_decl.position else None),
             modifiers=list(type_decl.modifiers or []),
             annotations=anno_list(type_decl.annotations),
+            extras=extras,
         )
         nodes.append(class_node)
         edges.append(Edge(src=file_id, dst=class_id, type=EdgeType.CONTAINS))
@@ -362,7 +434,6 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
             for e in exts:
                 super_fqn = e.name if "." in e.name else fqn(e.name)
                 super_id = f"java::{super_fqn}"
-                # Placeholder node for super if not defined in this file
                 nodes.append(Node(id=super_id, type=NodeType.CLASS, name=super_fqn.split('.')[-1], fqn=super_fqn))
                 edges.append(Edge(src=class_id, dst=super_id, type=EdgeType.EXTENDS))
 
@@ -374,7 +445,15 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
                 nodes.append(Node(id=iface_id, type=NodeType.INTERFACE, name=iface_fqn.split('.')[-1], fqn=iface_fqn))
                 edges.append(Edge(src=class_id, dst=iface_id, type=EdgeType.IMPLEMENTS))
 
-        # Methods
+        # Fields (record types for resolver)
+        for body_decl in type_decl.body:
+            if isinstance(body_decl, javalang.tree.FieldDeclaration):
+                field_type = getattr(body_decl.type, 'name', None)
+                for declarator in body_decl.declarators or []:
+                    fname = declarator.name
+                    class_node.extras.setdefault("fields", {})[fname] = field_type
+
+        # Methods & Calls
         for body_decl in type_decl.body:
             if isinstance(body_decl, javalang.tree.MethodDeclaration):
                 method_name = body_decl.name
@@ -403,23 +482,22 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
                 nodes.append(mnode)
                 edges.append(Edge(src=class_id, dst=method_id, type=EdgeType.CONTAINS))
 
-                # Naive call collection (intra-class guess + qualifier capture)
+                # Naive call collection
                 if body_decl.body:
                     for _, node2 in body_decl:
                         if isinstance(node2, javalang.tree.MethodInvocation):
                             callee_name = node2.member
                             qualifier = getattr(node2, "qualifier", None)
-                            # Best-effort FQN guess (same class). You can enhance with import/type resolution.
                             target_fqn_guess = f"{class_node.fqn}.{callee_name}"
                             callee_id = f"java::{target_fqn_guess}"
                             edges.append(Edge(
                                 src=method_id,
                                 dst=callee_id,
                                 type=EdgeType.CALLS,
-                                extras={"qualifier": qualifier},
+                                extras={"qualifier": qualifier, "package": package_name, "imports": imports},
                             ))
 
-        # Annotation edges (string targets for easy filtering)
+        # Annotation edges
         for anno in class_node.annotations:
             edges.append(Edge(src=class_id, dst=f"anno::{anno}", type=EdgeType.ANNOTATED_BY))
 
@@ -515,6 +593,7 @@ import os, io
 from .graph_schema import CodeGraph, Node, Edge, NodeType, EdgeType
 from .java_parser import parse_java_source
 from .python_parser import parse_python_source
+from .resolver_java import resolve_calls as resolve_calls_java
 
 
 def build_graph_from_repo(repo_path: str, lang: str = "auto") -> CodeGraph:
@@ -548,18 +627,18 @@ def build_graph_from_repo(repo_path: str, lang: str = "auto") -> CodeGraph:
                     file_id = f"file::{path}"
                     G.add_node(Node(id=file_id, type=NodeType.FILE, name=fn, fqn=path, file=path, extras={"parse_error": str(e)}))
     derive_overrides(G)
+    # NEW: resolve Java CALLS edges using imports/package/field types
+    resolve_calls_java(G)
     return G
 
 
 def derive_overrides(G: CodeGraph):
     """Simple override inference: if class A extends B, and A.m(..) matches B.m(..) by name+arity, mark OVERRIDES."""
-    # Collect EXTENDS relations
     supers = {}
     for u, v, d in G.g.edges(data=True):
         if d.get("type") == EdgeType.EXTENDS:
             supers.setdefault(u, set()).add(v)
 
-    # Index methods by owning class (FQN prefix before last dot)
     class_methods = {}
     for nid, data in G.g.nodes(data=True):
         if data.get("type") == NodeType.METHOD:
@@ -570,13 +649,8 @@ def derive_overrides(G: CodeGraph):
             if cls:
                 class_methods.setdefault(cls, []).append((nid, name, arity))
 
-    # Traverse up to 3 hops of superclasses
     for cls, meths in class_methods.items():
-        # Node id for this class in graph is typically "java::FQN" for Java; build that key
-        cls_node_id = G.by_fqn.get(cls)
-        if not cls_node_id:
-            cls_node_id = f"java::{cls}"
-        # Gather supers transitively
+        cls_node_id = G.by_fqn.get(cls) or f"java::{cls}"
         queue = list(supers.get(cls_node_id, []))
         seen = set(queue)
         hops = 0
@@ -590,7 +664,6 @@ def derive_overrides(G: CodeGraph):
             queue = nxt
             hops += 1
 
-        # Collect methods on superclasses
         super_meths = []
         for sn in seen:
             for _, mn, d in G.g.out_edges(sn, data=True):
@@ -734,26 +807,43 @@ from typing import Literal
 from .exporters import compact_for_llm
 
 PROMPT_CONTROLLERS = (
-    "You are a senior backend reviewer. Analyze the provided code graph focused on web controllers.\n"
-    "Goal: identify endpoints, auth boundaries, cross-service calls, and risky patterns.\n"
-    "Return a structured report with:\n"
-    "1) Endpoint inventory (HTTP method, path if available, controller class, method name).\n"
-    "2) Downstream calls per endpoint (internal services, DAOs, http clients).\n"
-    "3) Security notes (missing auth/validation, deserialization of request bodies, exception leakage).\n"
-    "4) Duplications or dead endpoints (no callers, overlapping paths).\n"
-    "5) Suggestions: refactoring and tests.\n"
-    "Only use the provided graph. If data is missing, call it out explicitly.\n"
+    "You are a senior backend reviewer. Analyze the provided code graph focused on web controllers.
+"
+    "Goal: identify endpoints, auth boundaries, cross-service calls, and risky patterns.
+"
+    "Return a structured report with:
+"
+    "1) Endpoint inventory (HTTP method, path if available, controller class, method name).
+"
+    "2) Downstream calls per endpoint (internal services, DAOs, http clients).
+"
+    "3) Security notes (missing auth/validation, deserialization of request bodies, exception leakage).
+"
+    "4) Duplications or dead endpoints (no callers, overlapping paths).
+"
+    "5) Suggestions: refactoring and tests.
+"
+    "Only use the provided graph. If data is missing, call it out explicitly.
+"
 )
 
 PROMPT_LISTENERS = (
-    "You are a senior backend reviewer. Analyze the provided code graph focused on event/message listeners.\n"
-    "Return a structured report with:\n"
-    "1) Listener inventory (annotation or interface, event/topic/queue if available, class.method).\n"
-    "2) Fan-in / fan-out: what triggers these listeners and what they call downstream.\n"
-    "3) Ordering, retries, idempotency signals; potential dead-letter handling or lack thereof.\n"
-    "4) Concurrency hotspots or long-running work in listeners.\n"
-    "5) Suggestions: backpressure safeguards, poison message handling, observability.\n"
-    "Only use the provided graph. If data is missing, call it out explicitly.\n"
+    "You are a senior backend reviewer. Analyze the provided code graph focused on event/message listeners.
+"
+    "Return a structured report with:
+"
+    "1) Listener inventory (annotation or interface, event/topic/queue if available, class.method).
+"
+    "2) Fan-in / fan-out: what triggers these listeners and what they call downstream.
+"
+    "3) Ordering, retries, idempotency signals; potential dead-letter handling or lack thereof.
+"
+    "4) Concurrency hotspots or long-running work in listeners.
+"
+    "5) Suggestions: backpressure safeguards, poison message handling, observability.
+"
+    "Only use the provided graph. If data is missing, call it out explicitly.
+"
 )
 
 
@@ -761,7 +851,6 @@ def write_llm_pack(G, out_dir: str, prompt_text: str):
     import os, json
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "pack.json"), "w", encoding="utf-8") as f:
-        import json
         json.dump(G.to_json(), f)
     with open(os.path.join(out_dir, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(prompt_text)
@@ -854,8 +943,257 @@ After installing, create a tiny sample project with one Java controller and a Py
 
 ---
 
-### Next steps
+## 🐍 `codegraph/resolver_java.py`
 
-* Add framework-specific heuristics (Micronaut/Quarkus/WebFlux, Kafka/Rabbit/JMS etc.).
-* Improve call resolution using import/type analysis or Tree‑sitter.
-* Add a Neo4j exporter if you want to run Cypher queries on the graph.
+```python
+from __future__ import annotations
+from typing import List, Dict, Optional
+import re
+from .graph_schema import CodeGraph, EdgeType, NodeType, Edge
+
+# Heuristic Java call resolver:
+# - Uses CALLS edge extras: qualifier, package, imports
+# - Uses class extras.fields to map field name -> declared type
+# - Resolves targets to existing class METHOD nodes by name (any arity match)
+
+
+def resolve_calls(G: CodeGraph):
+    # Build quick indexes
+    class_nodes_by_simple: Dict[str, List[str]] = {}
+    for nid, data in G.g.nodes(data=True):
+        if data.get("type") == NodeType.CLASS:
+            simple = (data.get("name") or "").split(".")[-1]
+            class_nodes_by_simple.setdefault(simple, []).append(nid)
+
+    def find_class_fqn(simple: str, pkg: Optional[str], imports: List[str]) -> Optional[str]:
+        # 1) Exact import match
+        for imp in imports or []:
+            if imp.endswith("." + simple) or imp == simple:
+                return imp
+        # 2) Same package guess
+        if pkg:
+            guess = f"{pkg}.{simple}"
+            # Validate exists in graph
+            nid = G.by_fqn.get(guess)
+            if nid:
+                return guess
+        # 3) Any class with this simple name (fallback)
+        for nid in class_nodes_by_simple.get(simple, []):
+            return G.g.nodes[nid].get("fqn")
+        return None
+
+    # Collect CALLS edges to potentially rewrite
+    calls = []
+    for u, v, k, d in G.g.edges(keys=True, data=True):
+        if d.get("type") == EdgeType.CALLS:
+            calls.append((u, v, k, d))
+
+    for u, v, k, d in calls:
+        qual = (d.get("extras") or {}).get("qualifier")
+        pkg = (d.get("extras") or {}).get("package")
+        imports = (d.get("extras") or {}).get("imports") or []
+        callee_guess = G.g.nodes[v].get("name") or G.g.nodes[v].get("fqn") or ""
+        # derive member name from callee node fqn or edge context
+        member = None
+        target_name = G.g.nodes[v].get("name")
+        # name is method simple name for METHOD nodes, but for our placeholder it's the method name too
+        if target_name:
+            member = target_name
+        # Try qualifier-based resolution
+        resolved_class_fqn = None
+        if qual:
+            # field? check class of caller
+            # Find caller class via CONTAINS edge (class -> method = u)
+            caller_class = None
+            for pred, _, ed in G.g.in_edges(u, data=True):
+                if ed.get("type") == EdgeType.CONTAINS and G.g.nodes[pred].get("type") == NodeType.CLASS:
+                    caller_class = pred
+                    break
+            if caller_class:
+                fields = (G.g.nodes[caller_class].get("extras") or {}).get("fields", {})
+                ftype = fields.get(qual)
+                if ftype:
+                    resolved_class_fqn = find_class_fqn(ftype, pkg, imports)
+            # Maybe qualifier is a Class name directly
+            if not resolved_class_fqn and qual[:1].upper() == qual[:1]:
+                resolved_class_fqn = find_class_fqn(qual, pkg, imports)
+        else:
+            # unqualified -> same class
+            caller_class = None
+            for pred, _, ed in G.g.in_edges(u, data=True):
+                if ed.get("type") == EdgeType.CONTAINS and G.g.nodes[pred].get("type") == NodeType.CLASS:
+                    caller_class = pred
+                    break
+            if caller_class:
+                resolved_class_fqn = G.g.nodes[caller_class].get("fqn")
+
+        if not (resolved_class_fqn and member):
+            continue
+
+        # find candidate method nodes under resolved class by name
+        target_class_node = G.by_fqn.get(resolved_class_fqn)
+        if not target_class_node:
+            continue
+        method_targets = []
+        for _, mn, ed in G.g.out_edges(target_class_node, data=True):
+            if ed.get("type") == EdgeType.CONTAINS and G.g.nodes[mn].get("type") == NodeType.METHOD:
+                if G.g.nodes[mn].get("name") == member:
+                    method_targets.append(mn)
+
+        if not method_targets:
+            continue
+
+        # Rewire: remove old edge and add resolved edges
+        G.g.remove_edge(u, v, key=k)
+        for t in method_targets:
+            G.add_edge(Edge(src=u, dst=t, type=EdgeType.CALLS, extras={"resolved": True}))
+```
+
+## 🐍 `codegraph/query_engine.py`
+
+```python
+from __future__ import annotations
+from typing import Dict, Any, Optional
+import re
+from .graph_schema import CodeGraph, NodeType, EdgeType
+
+# Lightweight dynamic query engine for natural-language-like filters.
+# Filters (all optional): text, kind, annotations_any, name_regex, file_regex,
+# calls, implements, extends, neighbors.
+
+KIND_MAP = {
+    "file": NodeType.FILE,
+    "class": NodeType.CLASS,
+    "interface": NodeType.INTERFACE,
+    "enum": NodeType.ENUM,
+    "method": NodeType.METHOD,
+    "function": NodeType.FUNCTION,
+}
+
+def _match_text(s: Optional[str], needle: str) -> bool:
+    return bool(s and needle.lower() in s.lower())
+
+def dynamic_query(G: CodeGraph, q: Dict[str, Any]) -> CodeGraph:
+    text = q.get("text")
+    kind = q.get("kind")
+    annos = set(q.get("annotations_any") or [])
+    name_regex = q.get("name_regex")
+    file_regex = q.get("file_regex")
+    calls = q.get("calls")
+    implements = q.get("implements")
+    extends = q.get("extends")
+    neighbors = int(q.get("neighbors") or 0)
+
+    kind_enum = KIND_MAP.get(kind.lower()) if isinstance(kind, str) else None
+    name_rx = re.compile(name_regex) if name_regex else None
+    file_rx = re.compile(file_regex) if file_regex else None
+
+    seeds = []
+    for n, d in G.g.nodes(data=True):
+        if kind_enum and d.get("type") != kind_enum:
+            continue
+        if text and not (
+            _match_text(d.get("name"), text)
+            or _match_text(d.get("fqn"), text)
+            or any(_match_text(a, text) for a in d.get("annotations", []))
+            or _match_text(d.get("file"), text)
+        ):
+            continue
+        if annos and not (set(d.get("annotations", [])) & annos):
+            continue
+        if name_rx and not (name_rx.search(d.get("name") or "") or name_rx.search(d.get("fqn") or "")):
+            continue
+        if file_rx and not file_rx.search(d.get("file") or ""):
+            continue
+        seeds.append(n)
+
+    if implements:
+        seeds = [n for n in seeds if any(
+            data.get("type") == EdgeType.IMPLEMENTS and (str(v).endswith(implements) or (G.g.nodes.get(v,{}).get("name"," ").endswith(implements)))
+            for _, v, data in G.g.out_edges(n, data=True)
+        )]
+    if extends:
+        seeds = [n for n in seeds if any(
+            data.get("type") == EdgeType.EXTENDS and (str(v).endswith(extends) or (G.g.nodes.get(v,{}).get("name"," ").endswith(extends)))
+            for _, v, data in G.g.out_edges(n, data=True)
+        )]
+    if calls:
+        seeds = [n for n in seeds if any(
+            data.get("type") == EdgeType.CALLS and calls.lower() in (G.g.nodes.get(v,{}).get("fqn"," ") + G.g.nodes.get(v,{}).get("name"," ")).lower()
+            for _, v, data in G.g.out_edges(n, data=True)
+        )]
+
+    if not seeds:
+        return G.subgraph_by_nodes(set())
+    return G.neighbors_k_hops(seeds, k=neighbors) if neighbors > 0 else G.subgraph_by_nodes(seeds)
+```
+
+---
+
+## 🐍 `codegraph/server.py`
+
+```python
+from __future__ import annotations
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+import os
+
+from .graph_builder import build_graph_from_repo
+from .graph_schema import CodeGraph
+from .queries import slice_controllers, slice_listeners
+from .llm_packager import build_llm_pack
+from .query_engine import dynamic_query
+
+app = FastAPI(title="CodeGraph Toolkit API", version="0.2.0")
+
+GRAPH: Optional[CodeGraph] = None
+
+class BuildReq(BaseModel):
+    repo: str = Field(..., description="Path to source repo mounted in container")
+    lang: str = Field("auto", description="auto|java|python")
+
+class QueryReq(BaseModel):
+    query: Dict[str, Any] = Field(default_factory=dict)
+
+class SliceReq(BaseModel):
+    kind: str = Field(..., description="controllers|listeners")
+    neighbors: int = 1
+
+class PackReq(BaseModel):
+    scenario: str = Field(..., description="controllers|listeners")
+    out_dir: str = "./out/llm"
+
+@app.post("/build")
+def build(req: BuildReq):
+    global GRAPH
+    GRAPH = build_graph_from_repo(req.repo, lang=req.lang)
+    return {"status": "ok", "nodes": GRAPH.g.number_of_nodes(), "edges": GRAPH.g.number_of_edges()}
+
+@app.post("/query")
+def query(req: QueryReq):
+    if GRAPH is None:
+        return {"error": "graph not built; call /build first"}
+    sg = dynamic_query(GRAPH, req.query)
+    return sg.to_json()
+
+@app.post("/slice")
+def slice(req: SliceReq):
+    if GRAPH is None:
+        return {"error": "graph not built; call /build first"}
+    if req.kind == "controllers":
+        sg = slice_controllers(GRAPH, neighbors=req.neighbors)
+    elif req.kind == "listeners":
+        sg = slice_listeners(GRAPH, neighbors=req.neighbors)
+    else:
+        return {"error": "unknown slice kind"}
+    return sg.to_json()
+
+@app.post("/llm-pack")
+def pack(req: PackReq):
+    if GRAPH is None:
+        return {"error": "graph not built; call /build first"}
+    out = os.path.join(req.out_dir, req.scenario)
+    build_llm_pack(GRAPH, req.scenario, out)
+    return {"status": "ok", "out": out}
+```

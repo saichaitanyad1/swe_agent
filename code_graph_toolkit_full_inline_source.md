@@ -3,6 +3,7 @@ Below is the complete, copy‑pasteable source tree for a small Python package t
 ---
 
 ## 📁 Project tree
+
 ```
 codegraph-toolkit/
   pyproject.toml
@@ -26,13 +27,16 @@ codegraph-toolkit/
 ---
 
 ## 🔧 How to use this inline source
-1) Create a folder named `codegraph-toolkit` and place the files exactly as below.
-2) In a terminal from the project root:
+
+1. Create a folder named `codegraph-toolkit` and place the files exactly as below.
+2. In a terminal from the project root:
+
    ```bash
    python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -e .
    ```
-3) Run the CLI:
+3. Run the CLI:
+
    ```bash
    codegraph --repo /path/to/repo --lang auto --out ./out --format json graphml mermaid
    codegraph --repo /path/to/repo --slice controllers --neighbors 2 --out ./out --llm-pack controllers
@@ -42,6 +46,7 @@ codegraph-toolkit/
 ---
 
 ## 📦 `pyproject.toml`
+
 ```toml
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -62,7 +67,8 @@ codegraph = "codegraph.cli:main"
 ---
 
 ## 🧾 `README.md`
-```markdown
+
+````markdown
 # CodeGraph Toolkit
 
 Parse a source repo into a code graph (classes, methods, interfaces, calls, overrides, annotations),
@@ -72,9 +78,10 @@ export JSON/GraphML/Mermaid, and carve LLM-ready slices for **controller**/**lis
 ```bash
 python -m venv .venv && source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
 pip install -e .
-```
+````
 
 ## Quickstart
+
 ```bash
 codegraph --repo /path/to/repo --lang auto --out ./out --format json graphml mermaid
 codegraph --repo /path/to/repo --slice controllers --neighbors 2 --out ./out --llm-pack controllers
@@ -84,15 +91,18 @@ codegraph --load ./out/graph.json --slice controllers --neighbors 1 --out ./out 
 ```
 
 Artifacts:
-- `graph.json` / `slice.controllers.json` / `slice.listeners.json`
-- `graph.graphml` (ingest to Neo4j/Gephi/NetworkX)
-- `graph.mmd` (Mermaid for quick diagramming)
-- `llm/<scenario>/pack.json` + `prompt.txt`
+
+* `graph.json` / `slice.controllers.json` / `slice.listeners.json`
+* `graph.graphml` (ingest to Neo4j/Gephi/NetworkX)
+* `graph.mmd` (Mermaid for quick diagramming)
+* `llm/<scenario>/pack.json` + `prompt.txt`
 
 ## Notes
-- Java parsing uses `javalang`; Python parsing uses builtin `ast`.
-- Heuristics can be extended in `codegraph/queries.py`.
-```
+
+* Java parsing uses `javalang`; Python parsing uses builtin `ast`.
+* Heuristics can be extended in `codegraph/queries.py`.
+
+````
 
 ---
 
@@ -119,11 +129,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
+````
 
 ---
 
 ## 🧩 `.gitignore`
+
 ```gitignore
 .venv/
 __pycache__/
@@ -137,6 +148,7 @@ __pycache__/
 ---
 
 ## 📃 `requirements.txt`
+
 ```text
 javalang>=0.13.0
 networkx>=3.0
@@ -145,6 +157,7 @@ networkx>=3.0
 ---
 
 ## 🐍 `codegraph/__init__.py`
+
 ```python
 from .graph_schema import Node, Edge, NodeType, EdgeType, CodeGraph
 ```
@@ -152,6 +165,7 @@ from .graph_schema import Node, Edge, NodeType, EdgeType, CodeGraph
 ---
 
 ## 🐍 `codegraph/__main__.py`
+
 ```python
 from .cli import main
 if __name__ == "__main__":
@@ -161,6 +175,7 @@ if __name__ == "__main__":
 ---
 
 ## 🐍 `codegraph/graph_schema.py`
+
 ```python
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
@@ -282,6 +297,7 @@ class CodeGraph:
 ---
 
 ## 🐍 `codegraph/java_parser.py`
+
 ```python
 from __future__ import annotations
 from typing import List, Tuple
@@ -417,6 +433,7 @@ def parse_java_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
 ---
 
 ## 🐍 `codegraph/python_parser.py`
+
 ```python
 from __future__ import annotations
 import ast, os
@@ -491,6 +508,7 @@ def parse_python_source(src: str, path: str) -> Tuple[List[Node], List[Edge]]:
 ---
 
 ## 🐍 `codegraph/graph_builder.py`
+
 ```python
 from __future__ import annotations
 import os, io
@@ -593,6 +611,7 @@ def derive_overrides(G: CodeGraph):
 ---
 
 ## 🐍 `codegraph/exporters.py`
+
 ```python
 from __future__ import annotations
 from typing import Iterable
@@ -662,6 +681,7 @@ def compact_for_llm(
 ---
 
 ## 🐍 `codegraph/queries.py`
+
 ```python
 from __future__ import annotations
 from typing import Set
@@ -707,6 +727,7 @@ def slice_listeners(G: CodeGraph, neighbors: int = 1) -> CodeGraph:
 ---
 
 ## 🐍 `codegraph/llm_packager.py`
+
 ```python
 from __future__ import annotations
 from typing import Literal
@@ -760,6 +781,7 @@ def build_llm_pack(graph, scenario: Literal["controllers", "listeners"], out_dir
 ---
 
 ## 🐍 `codegraph/cli.py`
+
 ```python
 from __future__ import annotations
 import argparse, os, json
@@ -827,12 +849,13 @@ if __name__ == "__main__":
 ---
 
 ## ✅ Sanity test (optional)
+
 After installing, create a tiny sample project with one Java controller and a Python helper to verify graph construction. Then run `codegraph` as shown above and inspect `out/graph.json` and `out/graph.mmd`.
 
 ---
 
 ### Next steps
-- Add framework-specific heuristics (Micronaut/Quarkus/WebFlux, Kafka/Rabbit/JMS etc.).
-- Improve call resolution using import/type analysis or Tree‑sitter.
-- Add a Neo4j exporter if you want to run Cypher queries on the graph.
 
+* Add framework-specific heuristics (Micronaut/Quarkus/WebFlux, Kafka/Rabbit/JMS etc.).
+* Improve call resolution using import/type analysis or Tree‑sitter.
+* Add a Neo4j exporter if you want to run Cypher queries on the graph.
